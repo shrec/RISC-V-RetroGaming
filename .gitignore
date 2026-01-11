@@ -1,0 +1,14 @@
+# Ignore build artifacts
+retrostation
+*.o
+*.a
+*.so
+
+# Ignore editor files
+.vscode/
+*.swp
+*~
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
