@@ -10,6 +10,10 @@
 #include <cstring>
 #include <cmath>
 #include <vector>
+#include <string>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <algorithm>
 #include "themes.h"
 
 #define STB_TRUETYPE_IMPLEMENTATION
@@ -354,6 +358,80 @@ int InitInput(InputContext* ctx) {
     return ctx->kbd_fd;
 }
 
+// ROM Browser structures and functions
+struct ROMFile {
+    std::string name;
+    std::string path;
+    std::string extension;
+};
+
+std::vector<ROMFile> ScanROMs(const char* path, const std::vector<std::string>& extensions) {
+    std::vector<ROMFile> roms;
+    DIR* dir = opendir(path);
+    if (!dir) return roms;
+    
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        if (entry->d_type == DT_REG) {
+            std::string filename = entry->d_name;
+            size_t dotPos = filename.find_last_of('.');
+            if (dotPos != std::string::npos) {
+                std::string ext = filename.substr(dotPos);
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                
+                for (const auto& validExt : extensions) {
+                    if (ext == validExt) {
+                        ROMFile rom;
+                        rom.name = filename.substr(0, dotPos);
+                        rom.path = std::string(path) + "/" + filename;
+                        rom.extension = ext;
+                        roms.push_back(rom);
+                        break;
+                    }
+                }
+            }
+        } else if (entry->d_type == DT_DIR && entry->d_name[0] != '.') {
+            // Recursive scan
+            std::string subdir = std::string(path) + "/" + entry->d_name;
+            auto subRoms = ScanROMs(subdir.c_str(), extensions);
+            roms.insert(roms.end(), subRoms.begin(), subRoms.end());
+        }
+    }
+    closedir(dir);
+    
+    std::sort(roms.begin(), roms.end(), [](const ROMFile& a, const ROMFile& b) {
+        return a.name < b.name;
+    });
+    
+    return roms;
+}
+
+const char* GetROMPath(int consoleIndex) {
+    switch(consoleIndex) {
+        case 0: return "/home/user/Roms/Nintendo [GoodNES] (2022) v4.03";
+        case 1: return "/home/user/Roms/Super Nintendo [GoodSNES] (2018) v3.27";
+        case 2: return "/home/user/Roms/Nintendo 64 [GoodN64] (2019) v3.27";
+        case 3: return "/home/user/Roms/SEGA Mega Drive II [GoodGEN] (2018) v3.21";
+        case 4: return "/home/user/Roms/SEGA Master System [GoodSMS] (2022) v4.01";
+        case 5: return "/home/user/Roms/SEGA Mega CD";
+        case 6: return "/home/user/Roms/SNK Neo Geo CD";
+        default: return "/home/user/Roms";
+    }
+}
+
+std::vector<std::string> GetROMExtensions(int consoleIndex) {
+    switch(consoleIndex) {
+        case 0: return {".nes", ".fds", ".unf", ".unif"};
+        case 1: return {".smc", ".sfc", ".fig", ".swc"};
+        case 2: return {".n64", ".z64", ".v64"};
+        case 3: return {".bin", ".md", ".smd", ".gen"};
+        case 4: return {".sms", ".gg"};
+        case 5: return {".bin", ".cue", ".iso"};
+        case 6: return {".cue", ".iso", ".chd"};
+        default: return {".nes", ".smc", ".n64", ".bin"};
+    }
+}
+
 int main() {
     FBContext ctx;
     InputContext input;
@@ -387,6 +465,9 @@ int main() {
     int selectedIndex = 0;
     int settingsTab = 0;
     bool showSettings = false;
+    bool showROMs = false;
+    int selectedROMIndex = 0;
+    std::vector<ROMFile> currentROMs;
     
     const char* menuItems[] = {
         "ნინტენდო ფამიკომი (NES)",
@@ -415,14 +496,18 @@ int main() {
         while (input.kbd_fd >= 0 && read(input.kbd_fd, &ev, sizeof(ev)) > 0) {
             if (ev.type == EV_KEY && ev.value == 1) {
                 if (ev.code == KEY_UP) {
-                    if (showSettings && settingsTab == 3) {
+                    if (showROMs) {
+                        selectedROMIndex = (selectedROMIndex - 1 + currentROMs.size()) % currentROMs.size();
+                    } else if (showSettings && settingsTab == 3) {
                         currentThemeIndex = (currentThemeIndex - 1 + allThemes.size()) % allThemes.size();
                         currentTheme = allThemes[currentThemeIndex];
                     } else if (!showSettings) {
                         selectedIndex = (selectedIndex - 1 + menuCount) % menuCount;
                     }
                 } else if (ev.code == KEY_DOWN) {
-                    if (showSettings && settingsTab == 3) {
+                    if (showROMs) {
+                        selectedROMIndex = (selectedROMIndex + 1) % currentROMs.size();
+                    } else if (showSettings && settingsTab == 3) {
                         currentThemeIndex = (currentThemeIndex + 1) % allThemes.size();
                         currentTheme = allThemes[currentThemeIndex];
                     } else if (!showSettings) {
@@ -433,13 +518,32 @@ int main() {
                 } else if (ev.code == KEY_RIGHT && showSettings) {
                     settingsTab = (settingsTab + 1) % settingsTabCount;
                 } else if (ev.code == KEY_ENTER) {
-                    if (selectedIndex == menuCount - 2) {
+                    if (showROMs) {
+                        if (selectedROMIndex < currentROMs.size()) {
+                            printf("Launch ROM: %s\n", currentROMs[selectedROMIndex].path.c_str());
+                            // TODO: Launch emulator
+                        }
+                    } else if (selectedIndex == menuCount - 2) {
                         showSettings = !showSettings;
                     } else if (selectedIndex == menuCount - 1) {
                         running = false;
+                    } else if (selectedIndex < menuCount - 2) {
+                        // Load ROMs for selected console
+                        const char* romPath = GetROMPath(selectedIndex);
+                        std::vector<std::string> extensions = GetROMExtensions(selectedIndex);
+                        printf("Scanning ROMs in: %s\n", romPath);
+                        currentROMs = ScanROMs(romPath, extensions);
+                        printf("Found %d ROMs\n", (int)currentROMs.size());
+                        if (!currentROMs.empty()) {
+                            showROMs = true;
+                            selectedROMIndex = 0;
+                        }
                     }
                 } else if (ev.code == KEY_ESC) {
-                    if (showSettings) {
+                    if (showROMs) {
+                        showROMs = false;
+                        currentROMs.clear();
+                    } else if (showSettings) {
                         showSettings = false;
                     } else {
                         running = false;
@@ -545,6 +649,71 @@ int main() {
             char footer[256];
             snprintf(footer, sizeof(footer), "თემა: %s | ზემოთ/ქვემოთ: ნავიგაცია | ENTER: არჩევა", currentTheme.name.c_str());
             DrawText(&ctx, ctx.width / 40, ctx.height - 55, footer, ColorToU32(currentTheme.textSecondary), 1.2f);
+        } else if (showROMs) {
+            // ROM Browser UI
+            int headerHeight = 140;
+            FillRect(&ctx, 0, 0, ctx.width, headerHeight, ColorToU32(currentTheme.headerBg));
+            
+            const char* consoleNames[] = {
+                "ნინტენდო ფამიკომი (NES)",
+                "სუპერ ნინტენდო (SNES)",
+                "ნინტენდო 64",
+                "სეგა მეგა დრაივი",
+                "სეგა მასტერ სისტემა",
+                "სეგა მეგა CD",
+                "SNK ნეო გეო CD"
+            };
+            
+            if (selectedIndex < 7) {
+                DrawText(&ctx, 80, 55, consoleNames[selectedIndex], ColorToU32(currentTheme.textHighlight), 2.0f);
+            }
+            
+            char romCountText[64];
+            snprintf(romCountText, sizeof(romCountText), "თამაშები: %d", (int)currentROMs.size());
+            DrawText(&ctx, ctx.width - 350, 55, romCountText, ColorToU32(currentTheme.textSecondary), 1.5f);
+            
+            // ROM List
+            int listY = headerHeight + 40;
+            int itemHeight = 120;
+            int itemSpacing = 20;
+            int itemWidth = ctx.width - ctx.width / 10;
+            int itemX = ctx.width / 20;
+            
+            int maxVisible = (ctx.height - headerHeight - 100) / (itemHeight + itemSpacing);
+            int startIndex = selectedROMIndex - maxVisible / 2;
+            if (startIndex < 0) startIndex = 0;
+            if (startIndex + maxVisible > (int)currentROMs.size()) {
+                startIndex = (int)currentROMs.size() - maxVisible;
+                if (startIndex < 0) startIndex = 0;
+            }
+            
+            for (int i = 0; i < maxVisible && (startIndex + i) < (int)currentROMs.size(); i++) {
+                int romIndex = startIndex + i;
+                int y = listY + i * (itemHeight + itemSpacing);
+                
+                uint32_t bgColor = (romIndex == selectedROMIndex) ? 
+                    ColorToU32(currentTheme.selectionBg) : ColorToU32(currentTheme.buttonNormal);
+                
+                if (romIndex == selectedROMIndex) {
+                    FillRect(&ctx, itemX - 15, y - 10, itemWidth + 30, itemHeight + 20, 
+                             ColorToU32(currentTheme.selectionGlow));
+                }
+                
+                FillRect(&ctx, itemX, y, itemWidth, itemHeight, bgColor);
+                
+                // ROM icon (disc icon for all)
+                int iconX = itemX + 40;
+                int iconY = y + 20;
+                DrawDiscIcon(&ctx, iconX, iconY, 80, ColorToU32(currentTheme.iconFolder));
+                
+                // ROM name
+                DrawText(&ctx, iconX + 120, y + 48, currentROMs[romIndex].name.c_str(), 
+                         ColorToU32(currentTheme.textPrimary), 1.6f);
+            }
+            
+            // Footer
+            FillRect(&ctx, 0, ctx.height - 100, ctx.width, 100, ColorToU32(currentTheme.headerBg));
+            DrawText(&ctx, 80, ctx.height - 55, "ESC - უკან / ENTER - გაშვება", ColorToU32(currentTheme.textSecondary), 1.2f);
         }
         
         SwapBuffers(&ctx);
